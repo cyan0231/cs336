@@ -34,3 +34,7 @@ wandb/
 *.pth
 *.ckpt
 *.safetensors
+
+# Teaching notes, lessons, and learning records
+/teaching/
+/NOTES.md/
