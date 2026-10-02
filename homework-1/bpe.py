@@ -8,7 +8,8 @@ def train_bpe(input_path,special_token,vocab_size):
     with open(input_path,'r',encoding='utf-8') as f:
         text=f.read()
     if special_token:
-        special_regex = "|".join(re.escape(t) for t in special_token)
+        sorted_special = sorted(special_token, key=len, reverse=True)
+        special_regex = "|".join(re.escape(t) for t in sorted_special)
         parts=re.split(f"({special_regex})",text)
         train_segment=[p for p in parts if p not in special_token]
     else:

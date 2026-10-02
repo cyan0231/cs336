@@ -4,7 +4,6 @@ import json
 import os
 import tempfile
 from pathlib import Path
-
 import numpy as np
 
 from bpe import bytes_to_unicode
