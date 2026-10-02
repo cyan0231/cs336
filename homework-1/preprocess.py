@@ -14,8 +14,8 @@ from tokenizer import BPETokenizer
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 VOCAB_PATH = os.path.join(BASE_DIR, "output", "vocab.json")
 MERGES_PATH = os.path.join(BASE_DIR, "output", "merges.txt")
-TRAIN_TXT = os.path.join(BASE_DIR, "TinyStoriesV2-GPT4-train.txt")
-VALID_TXT = os.path.join(BASE_DIR, "TinyStoriesV2-GPT4-valid.txt")
+TRAIN_TXT = os.path.join(BASE_DIR, "TinyStories-train.txt")
+VALID_TXT = os.path.join(BASE_DIR, "TinyStories-valid.txt")
 TRAIN_BIN = os.path.join(BASE_DIR, "TinyStoriesV2-GPT4-train.bin")
 VALID_BIN = os.path.join(BASE_DIR, "TinyStoriesV2-GPT4-valid.bin")
 

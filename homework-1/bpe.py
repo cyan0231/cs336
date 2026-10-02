@@ -123,7 +123,7 @@ def save_tokenizer_files(vocab, merges, out_dir):
             f.write(f"{s1} {s2}\n")
 def main():
     base_dir = os.path.dirname(os.path.abspath(__file__))
-    input_path = os.path.join(base_dir, "TinyStoriesV2-GPT4-train.txt")
+    input_path = os.path.join(base_dir, "TinyStories-train.txt")
     vocab_size=10000
     special_tokens = ["<|endoftext|>"]
     output_dir = os.path.join(base_dir, "output")
