@@ -1,4 +1,4 @@
-"""将 TinyStories 文本编码为 uint16 原始二进制文件；填写下方路径后运行。"""
+"""将脚本旁的 TinyStories 文本编码为 uint16 原始二进制文件。"""
 
 import json
 import os
@@ -11,13 +11,14 @@ from bpe import bytes_to_unicode
 from tokenizer import BPETokenizer
 
 
-# 配置区：填写实际路径。相对路径以运行脚本时的工作目录为基准。
-VOCAB_PATH = ""
-MERGES_PATH = ""
-TRAIN_TXT = ""
-VALID_TXT = ""
-TRAIN_BIN = ""
-VALID_BIN = ""
+# 路径以当前脚本所在目录为基准，整个文件夹搬到服务器后仍然有效。
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+VOCAB_PATH = os.path.join(BASE_DIR, "output", "vocab.json")
+MERGES_PATH = os.path.join(BASE_DIR, "output", "merges.txt")
+TRAIN_TXT = os.path.join(BASE_DIR, "TinyStoriesV2-GPT4-train.txt")
+VALID_TXT = os.path.join(BASE_DIR, "TinyStoriesV2-GPT4-valid.txt")
+TRAIN_BIN = os.path.join(BASE_DIR, "TinyStoriesV2-GPT4-train.bin")
+VALID_BIN = os.path.join(BASE_DIR, "TinyStoriesV2-GPT4-valid.bin")
 
 SPECIAL_TOKENS = ["<|endoftext|>"]
 DOCUMENT_SEPARATOR = "<|endoftext|>"

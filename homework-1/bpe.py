@@ -121,10 +121,11 @@ def save_tokenizer_files(vocab, merges, out_dir):
             s2 = "".join(byte_encoder[b] for b in p2)
             f.write(f"{s1} {s2}\n")
 def main():
-    input_path=''
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    input_path = os.path.join(base_dir, "TinyStoriesV2-GPT4-train.txt")
     vocab_size=10000
     special_tokens = ["<|endoftext|>"]
-    output_dir = ""
+    output_dir = os.path.join(base_dir, "output")
     vocab,merge=train_bpe(input_path,special_tokens,vocab_size)
     save_tokenizer_files(vocab,merge,output_dir)
 

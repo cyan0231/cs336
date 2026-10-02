@@ -25,8 +25,8 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 def main():
     base_dir = os.path.dirname(os.path.abspath(__file__))
 
-    train_path = os.path.join(base_dir, "data", "train.bin")
-    valid_path = os.path.join(base_dir, "data", "valid.bin")
+    train_path = os.path.join(base_dir, "TinyStoriesV2-GPT4-train.bin")
+    valid_path = os.path.join(base_dir, "TinyStoriesV2-GPT4-valid.bin")
 
     output_dir = os.path.join(base_dir, "output")
     os.makedirs(output_dir, exist_ok=True)

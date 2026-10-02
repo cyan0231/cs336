@@ -24,6 +24,9 @@ htmlcov/
 !.env.example
 
 # Local datasets, model weights, and experiment outputs
+/homework-1/TinyStories*.txt
+/homework-1/*.bin
+/homework-1/output/
 data/
 datasets/
 checkpoints/
