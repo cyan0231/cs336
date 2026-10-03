@@ -159,7 +159,7 @@ class TransformerLM(nn.Module):
         super().__init__()
         
         self.embedding=Embedding(vocab_size,d_model,device=device,dtype=dtype)
-        
+        self.context_length=context_length
         self.net=nn.Sequential(*[TransformerBlock(d_model,head_num,d_ff,context_length,theta,device,dtype) for _ in range(num_layers)])
         self.norm=RMSNorm(d_model,device=device,dtype=dtype)
         self.linear=Linear(d_model,output_size,device=device,dtype=dtype)
@@ -171,4 +171,44 @@ class TransformerLM(nn.Module):
             x=layer(x,token_position)
         x=self.norm(x)
         return self.linear(x)
+
+    @torch.no_grad()
+    def generate(self,prompt,max_answer,eos_token_id=None,temperature=1.0,top_p=1.0,): #复制，截取，温度，top-p，softmax，概率抽样，拼接，判断是否结束
+        self.eval()
+        copy_prompt=prompt.clone()
+        for _ in range(max_answer):
+            id_copy=copy_prompt[:,-self.context_length:]
+            logit=self.forward(id_copy)
+            logit=logit[:,-1,:] #batch vacab
+
+            if temperature !=1.0:
+                logit=logit/(temperature+1e-8)
+            if top_p!=1.0:
+                logit=self._top_p_filter(logit,top_p)
+            logit=softmax(logit)
+            next_token=torch.multinomial(logit,1)
+
+            copy_prompt=torch.cat((copy_prompt,next_token),dim=-1)
+
+            if eos_token_id is not None and(next_token==eos_token_id).all():
+                break
+        return copy_prompt
+    def _top_p_filter(self,logit,top_p): #降序排序，算累积概率分布，超过阈值标为true，右移，将需要溢出的logit值设为-inf
+        sorted_value,sorted_pos=torch.sort(logit,descending=True,dim=-1) #logit batch vocab
+
+        cumu=torch.cumsum(softmax(sorted_value,dim=-1),dim=-1)
+
+        sorted_indices=cumu>top_p
+
+        sorted_indices[:,1:]=sorted_indices[:,:-1].clone()
+        sorted_indices[:,0]=False
+
+        mask=sorted_indices.scatter(1,sorted_pos,sorted_indices)
+        logit=logit.masked_fill(mask,float('-inf'))
+        return logit
+
+
+
+
+
 
