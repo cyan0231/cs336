@@ -181,12 +181,19 @@ class TransformerLM(nn.Module):
             logit=self.forward(id_copy)
             logit=logit[:,-1,:] #batch vacab
 
-            if temperature !=1.0:
-                logit=logit/(temperature+1e-8)
-            if top_p!=1.0:
-                logit=self._top_p_filter(logit,top_p)
-            logit=softmax(logit)
-            next_token=torch.multinomial(logit,1)
+            if temperature < 0:
+                raise ValueError("temperature 不能小于 0")
+
+            if temperature == 0:
+                next_token = logit.argmax(dim=-1, keepdim=True)
+            else:
+                logit = logit / temperature
+
+                if top_p != 1.0:
+                    logit = self._top_p_filter(logit, top_p)
+
+                probs = softmax(logit)
+                next_token = torch.multinomial(probs, 1)
 
             copy_prompt=torch.cat((copy_prompt,next_token),dim=-1)
 
