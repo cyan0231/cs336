@@ -214,7 +214,7 @@ def run_grpo_training(args, save_dir):
     question_pool=load_gsm8k_dataset(
         args.train_data_path,
         SYSTEM_PROMPT_TEMPLATE,
-    ) #加载原始数据
+    ) #加载原始数据，并将其改为提示词+最终答案
     tokenizer = AutoTokenizer.from_pretrained(args.model_id)
 
     if tokenizer.pad_token_id is None:
