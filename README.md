@@ -1,11 +1,12 @@
 # CS336 学习与实现记录
 
-记录 CS336 作业的代码实现与实验结果，目前包含从头实现语言模型的 homework-1，以及基于 Qwen2.5-Math-1.5B 进行 SFT 和 GRPO 训练的 homework-5。
+记录 CS336 作业的代码实现与实验结果，目前包含从头实现语言模型的 homework-1、基于 Qwen2.5-Math-1.5B 的 homework-5 SFT / GRPO 实验，以及基于普通 Qwen2.5-1.5B Base 的补充作业：SFT、DPO 与四项能力测评。
 
 | 作业 | 内容 | 当前进度 |
 | --- | --- | --- |
 | [Homework 1](#homework-1基础语言模型) | BPE、Transformer、TinyStories 预训练与文本续写 | 已完成训练和交互式续写 |
 | [Homework 5](#homework-5sft-与-grpo) | GSM8K 数据处理、SFT、GRPO 与 vLLM 评测 | 已完成单卡训练及完整测试集评测 |
+| [Homework 5 补充](#homework-5-supplement) | 普通 Base 模型的 SFT、DPO，MMLU / GSM8K / AlpacaEval / Safety 测评 | 已完成 Base、SFT 和两版 DPO 实验；仓库收录 BF16 版 DPO 代码 |
 
 数据集、基础模型和服务器生成的实验产物需要单独准备，克隆代码不会自动获得这些文件。
 
@@ -367,3 +368,412 @@ python -u grpo/train_grpo.py > grpo_train.log 2>&1
 另一个 SSH 终端可执行 `watch -n 1 nvidia-smi` 查看显存与 GPU 使用率，或用 `tail -f grpo_train.log` 观察日志。训练、生成和首次优化器更新的显存占用不同，生成阶段能运行不代表训练阶段一定不会 OOM。
 
 作业五的学习与实现参考了 [chaser026/cs336-5](https://github.com/chaser026/cs336-5)。数学评分代码保留了原有的 Apache-2.0 许可头及 [understand-r1-zero](https://github.com/sail-sg/understand-r1-zero) 来源说明；当前实现使用固定常数归一化、不除组内标准差等配置，不等同于完整复现原始 GRPO 论文的所有设置。
+
+<a id="homework-5-supplement"></a>
+
+## Homework 5 补充：SFT、DPO 与四项测评
+
+本部分使用普通的 [Qwen2.5-1.5B Base](https://huggingface.co/Qwen/Qwen2.5-1.5B)，先做全参数 SFT，再以 SFT 模型为起点进行离线 DPO。通过 MMLU、GSM8K、AlpacaEval 和 SimpleSafetyTests，观察知识问答、数学、有用性及安全性的变化。它与前一节使用 Math 模型和 GRPO 的实验分开记录。
+
+**代码与实验版本：当前仓库中的 `dpo/train_dpo.py` 是实验室 RTX 3090 上的 BF16 参数版本。** 后来在 AutoDL 上完成了 FP32 参数更新、BF16 混合精度前向的对照实验，但对应修改后的脚本尚未收录。下文提供的 DPO 命令针对仓库现有 BF16 代码；不能只换一条命令就用它复现 FP32 实验。
+
+### 目录与运行约定
+
+```text
+homework-5-supplement/
+├── sft/
+│   ├── preprocess_sft.py       # 套统一模板，过滤空白数据
+│   ├── inspect_sft_lengths.py  # 分词长度统计，不截断
+│   └── train_sft.py            # SFT训练、token loss测试、checkpoint恢复
+├── dpo/
+│   ├── inspect_dpo_lengths.py  # HH单轮筛选与偏好对长度统计
+│   └── train_dpo.py            # 当前收录的BF16版DPO：smoke/train/eval
+├── evaluation/
+│   ├── evaluate_mmlu.py
+│   ├── evaluate_gsm8k.py
+│   ├── evaluate_alpaca.py      # 生成回答，不调用裁判
+│   ├── evaluate_safety.py      # 生成回答，不调用裁判
+│   ├── judge_alpaca_tool.py    # 官方AlpacaEval工具＋自定义DeepSeek裁判
+│   ├── judge_safety.py         # DeepSeek安全性判断
+│   └── deepseek_judge/
+│       ├── configs.yaml
+│       └── prompt.txt
+├── model/Qwen2.5-1.5B/         # 自行下载的Base模型与tokenizer
+├── data/                      # 自行准备，格式见下文
+└── result/                    # 运行生成的模型、配置与逐题结果
+```
+
+`evaluation/test.py` 当前是空文件，不是测评入口。以下命令均在 `homework-5-supplement` 中执行；相对路径以当前工作目录为准：
+
+```bash
+cd cs336/homework-5-supplement
+```
+
+模型、原始数据、训练checkpoint和逐题输出未随本次代码提交提供；下面的数字来自服务器实验记录。当前仓库没有完整依赖锁定文件，也没有自动下载全部数据的统一脚本。
+
+### 环境记录
+
+| 用途 | 已使用的环境 |
+| --- | --- |
+| RTX 3090 24GB上的SFT、BF16版DPO及生成测评 | Python 3.11、PyTorch 2.5.1、Transformers 4.50.3、vLLM 0.7.2、pandas 2.2.3；Conda环境名 `336-a5` |
+| AutoDL RTX 6000D上的FP32更新DPO | Python 3.12、PyTorch 2.8.0+cu128、Transformers 4.50.3、safetensors 0.5.3；GPU可用显存约83.05 GiB |
+| AutoDL独立生成测评环境 `.venv-eval` | PyTorch 2.8.0+cu128、vLLM 0.10.2、Transformers 4.55.2、pandas 2.2.3、NumPy 2.2.6 |
+| 独立API裁判环境 `.venv-judge` | alpaca-eval 0.6.6、openai 3.39.0、pandas 2.2.3；AutoDL另安装setuptools 79.0.1解决 `pkg_resources` 缺失 |
+
+训练与vLLM依赖应分开管理，尤其不要在已配置好的训练环境中直接升级vLLM。AutoDL测评环境的建立方式如下，前提是基础环境已经安装可用的 PyTorch 2.8.0+cu128：
+
+```bash
+python -m venv --system-site-packages .venv-eval
+.venv-eval/bin/python -m pip install \
+  "vllm==0.10.2" "transformers==4.55.2" "pandas==2.2.3"
+```
+
+这个环境复用基础环境的PyTorch，将新增依赖安装在自己的目录；它不是可用于任意GPU的通用安装配方。实验室旧版vLLM与AutoDL新版vLLM的生成结果也不保证逐token一致。
+
+### 数据来源与文件格式
+
+| 用途 | 数据来源 | 本地文件及要求 |
+| --- | --- | --- |
+| SFT | [garg-aayush/sft-cs336-assign5-datasets](https://huggingface.co/datasets/garg-aayush/sft-cs336-assign5-datasets)，revision `ac710ef808346bf458d7b093bfe4586cb15699d9` | `data/sft-cs336-assign5-datasets/sft-instruct/{sample_train,train,test}.jsonl`；每行包含字符串 `prompt`、`response` |
+| DPO | [Anthropic/hh-rlhf](https://huggingface.co/datasets/Anthropic/hh-rlhf)，revision `09be8c5bbc57cb3887f3a9732ad6aa7ec602a1fa` | `data/hh-rlhf/<子集>/{train,test}.jsonl.gz`；每行包含完整对话字符串 `chosen`、`rejected` |
+| MMLU | [hendrycks/test](https://github.com/hendrycks/test) | `data/mmlu/test/*_test.csv`；57个学科，无表头，每行依次为问题、A/B/C/D四个选项、标准答案，共14,042题 |
+| GSM8K | [openai/grade-school-math](https://github.com/openai/grade-school-math) | `data/gsm8k/test.jsonl`；原始 `question`、`answer`，答案含 `####` 分隔符，共1,319题 |
+| AlpacaEval | [tatsu-lab/alpaca_eval](https://huggingface.co/datasets/tatsu-lab/alpaca_eval) | `data/alpaca_eval/alpaca_eval.jsonl`；805条，每行保留 `instruction`、参考 `output`、参考 `generator`；本次参考回答来自 `text_davinci_003` |
+| SimpleSafetyTests | [Bertievidgen/SimpleSafetyTests](https://huggingface.co/datasets/Bertievidgen/SimpleSafetyTests) | 原始 `sst_test_cases.csv` 保存为 `data/simple_safety_tests/simple_safety_tests.csv`；生成脚本要求列 `id`、`prompt`、`harm_area`，共100题，每类20题 |
+
+SFT使用的数据是安全增广的UltraChat单轮指令数据。与原作业数学SFT不同，这里原始 `prompt` 是普通指令，预处理后才套入统一提示词。
+
+HH四个子集为 `harmless-base`、`helpful-base`、`helpful-online`、`helpful-rejection-sampled`，分别覆盖无害性，以及不同采集阶段/方式的有用性偏好。它们不是同一批问题的四组回答；`chosen` 表示相对更受偏好，不保证绝对正确，`rejected` 也不是“拒绝回答”的意思。原数据可能包含多轮历史，本实验只保留单轮。
+
+模型与训练数据可通过 `huggingface_hub.snapshot_download` 下载。HF官方站不可达时，实验中曾使用 `HF_ENDPOINT=https://hf-mirror.com`；该环境变量需要在导入下载库前设置。原始数据不必解压，DPO脚本直接使用 `gzip.open` 读取。
+
+### 提示词与评分口径
+
+SFT与四项生成测评使用相同的完整 `SYSTEM_PROMPT` 及外层格式，具体文本保存在预处理和测评脚本中：
+
+```text
+{SYSTEM_PROMPT}
+
+### Instruction:
+{问题或任务指令}
+
+### Response:
+```
+
+MMLU在任务指令中附加选项与答案格式要求。标准答案、Alpaca参考回答不会放进被测模型的输入。
+
+两版DPO训练使用参考仓库的简短模板，与上述完整系统提示词不同：
+
+```text
+Below is an instruction that describes a task.
+
+### Instruction:
+{问题}
+
+### Response:
+```
+
+四个模型阶段的能力测评都保持完整统一模板；早期旧模板的结果不混入下面的主结果表。
+
+| 测评 | 主要指标与评分方法 | 最多新增token / 总长度上限 |
+| --- | --- | --- |
+| MMLU | 优先提取 `The correct answer is A` 一类表达，否则取首个独立大写A–D；与标准选项比较 | 64 / 2048 |
+| GSM8K | 从标准答案 `####` 后取数值；模型输出按当前正则处理数字间逗号后取最后一个数，转换为float精确比较 | 512 / 2048 |
+| AlpacaEval | 自定义DeepSeek裁判比较模型回答与固定参考回答，使用官方工具的普通胜率 `get_winrate` | 1024 / 4096 |
+| SimpleSafetyTests | 裁判仅输出True（不安全）或False（安全），统计判安全比例与类别比例 | 512 / 2048 |
+
+生成共同设置为BF16、temperature=0、top-p=1、每题1条回答、seed=0、`stop=["### Instruction:"]`、正常EOS停止、`max_num_seqs=4`、显存比例0.7和eager模式。达到长度上限的回答保留并记录；MMLU/GSM8K解析失败按错误计入总题数，不为提高成绩临时修改解析规则。
+
+AlpacaEval这里的胜率是对同一套参考回答的胜率，**不是DPO直接对战SFT的胜率，也不是官方排行榜或长度控制胜率**。Safety衡量裁判认为回答安全的比例，不等于有用性、正确拒答率或所有安全场景的通过率。
+
+### SFT：预处理、训练与测试
+
+先预处理，再统计分词长度：
+
+```bash
+python -u sft/preprocess_sft.py \
+  --input_dir data/sft-cs336-assign5-datasets/sft-instruct \
+  --output_dir data/sft_processed
+
+python -u sft/inspect_sft_lengths.py \
+  --model_path model/Qwen2.5-1.5B \
+  --data_dir data/sft_processed \
+  --output_file result/sft_length_stats.json
+```
+
+预处理逐行套模板，保留原始问题与回答文本；过滤空白字段，格式错误直接报错。处理后仍只有 `prompt`、`response` 两个字段，不分词、不截断、不追加EOS。默认不覆盖已有预处理或统计结果，重新生成需显式加 `--overwrite`。训练读取的是已套模板的prompt，不能再次套模板。
+
+| 数据 | 原始条数 | 空白过滤后 | 总长度不超过2048、含EOS |
+| --- | ---: | ---: | ---: |
+| sample_train | 1,000 | 1,000 | 试跑时按同一长度规则过滤，未单独汇总数量 |
+| train | 210,348 | 210,326 | 210,049 |
+| test | 23,110 | 23,108 | 23,083 |
+
+长度统计中，训练集完整序列平均637.5 token、P90为1,070、P99为1,454；只有277条超过2,048。因此采用超长整条过滤，不截断、不packing。
+
+训练时先将prompt和response分别编码（`add_special_tokens=False`），显式追加真实EOS。`make_batch`在micro-batch内动态右填充并提前错位，返回输入、labels和有效label mask：
+
+```text
+完整序列： [P1, P2, R1, R2, EOS]
+input_ids：[P1, P2, R1, R2]
+labels：   [P2, R1, R2, EOS]
+mask：     [ 0,  1,  1,   1]
+```
+
+先算全部位置的交叉熵，再乘mask；prompt和PAD不参与loss，回答与EOS参与。一次参数更新中，各micro-batch的loss sum除以该更新所有有效回答token总数，不简单平均各micro-batch的mean loss，也不再额外除以累积次数。
+
+先用调试集冒烟测试：
+
+```bash
+python -u sft/train_sft.py \
+  --mode train_eval \
+  --data_path data/sft_processed/sample_train.jsonl \
+  --output_dir result/sft_smoke_20 \
+  --max_steps 20 \
+  --save_every 20 \
+  --eval_limit 10
+```
+
+正式训练的参数与运行方式：
+
+```bash
+python -u sft/train_sft.py \
+  --mode train_eval \
+  --model_path model/Qwen2.5-1.5B \
+  --data_path data/sft_processed/train.jsonl \
+  --eval_data_path data/sft_processed/test.jsonl \
+  --output_dir result/sft_full_13129 \
+  --max_steps 13129 \
+  --max_seq_len 2048 \
+  --micro_batch_size 1 \
+  --gradient_accumulation_steps 16 \
+  --learning_rate 2e-5 \
+  --warmup_ratio 0.03 \
+  --max_grad_norm 1.0 \
+  --save_every 500 \
+  --eval_limit 0 \
+  --seed 42
+```
+
+使用BF16参数、SDPA、gradient checkpointing，关闭KV cache；AdamW的weight decay为0、betas为(0.9, 0.999)、eps为1e-8，3% warmup后cosine衰减。每500次更新保存完整checkpoint，保留最新两个周期checkpoint，结束另存 `final`。新训练要求输出目录不存在；支持通过 `--resume_from` 加载完整训练状态，但恢复功能尚未做实际中断验证。
+
+**13,129次更新不等于完整遍历训练集一轮。** 当前SFT的 `get_batch` 每次独立使用 `random.sample` 抽16条，跨更新可能重复；共抽取210,064个样本位置，独立样本覆盖率的期望约63%。这与下面按epoch顺序遍历的DPO不同。
+
+正式训练耗时67,694.20秒，约18小时48分钟；平均更新5.12秒，峰值已分配显存15.77 GiB、峰值保留显存22.87 GiB。结束后在23,083条合格test样本上计算teacher-forced回答token平均loss：共7,620,719个有效token，loss为 **1.112176**，耗时1,275.53秒。这个loss不是自由生成的正确率。
+
+需要单独运行完整token loss测试时：
+
+```bash
+python -u sft/train_sft.py \
+  --mode eval \
+  --model_path result/sft_full_13129/final \
+  --eval_data_path data/sft_processed/test.jsonl \
+  --output_dir result/sft_test_eval \
+  --eval_limit 0
+```
+
+### DPO：数据筛选与仓库现有训练代码
+
+先统计四个子集的单轮数据和长度：
+
+```bash
+python -u dpo/inspect_dpo_lengths.py \
+  --data_path data/hh-rlhf \
+  --model_path result/sft_full_13129/final \
+  --output_file result/dpo_length_stats.json
+```
+
+训练脚本自己读取原始压缩文件，不依赖外部 `convert_hh.py`。按 `Human:`、`Assistant:` 角色边界筛选单轮，检查两边问题一致，删除外层角色前缀；回答内部的普通空行不会被当作新一轮。四个子集的原始train全部用于训练，test只用于训练后的独立测试，不从train另切验证集。
+
+| 数据 | 原始偏好对 | 单轮等条件筛选后 | 任一序列超过512时过滤整对后 |
+| --- | ---: | ---: | ---: |
+| train | 160,800 | 49,278 | 48,925 |
+| test | 8,552 | 2,598 | 2,578 |
+
+长度分别计算“简短模板＋问题＋chosen/rejected回答＋EOS”，以两条序列中的较大长度判断是否超限。训练对最大序列长度平均132.84、P99为441；512上限过滤353对，占单轮合格数据的0.72%。
+
+每条样本提前编码为chosen/rejected各自的 `input_ids` 和 `response_mask`；micro-batch内右填充、构造错位labels。两个模型对数据里相同的两个回答计算概率，不现场采样新回答；reference是固定SFT副本，不是API裁判。
+
+```text
+chosen_logp   = 回答与EOS的token log probability之和
+rejected_logp = 回答与EOS的token log probability之和
+
+margin = beta × [(policy_chosen_logp − policy_rejected_logp)
+                 − (reference_chosen_logp − reference_rejected_logp)]
+loss = −logsigmoid(margin)
+```
+
+DPO对偏好对loss取平均，不按回答token数平均。仓库版本的micro-batch固定为1对，累积16对更新一次；每个epoch先打乱，再顺序遍历。正式训练1个epoch，共3,058次更新，最后13对也参与一次更新。
+
+先试跑普通样本20次更新，再用最长16对做2次压力更新，两部分都执行真实参数更新，试跑权重不保存：
+
+```bash
+python -u dpo/train_dpo.py \
+  --mode smoke \
+  --model_path result/sft_full_13129/final \
+  --reference_path result/sft_full_13129/final \
+  --output_dir result/dpo_smoke \
+  --max_seq_len 512 \
+  --batch_size 16
+```
+
+正式训练：
+
+```bash
+python -u dpo/train_dpo.py \
+  --mode train \
+  --model_path result/sft_full_13129/final \
+  --reference_path result/sft_full_13129/final \
+  --data_path data/hh-rlhf \
+  --output_dir result/dpo_full_epoch1 \
+  --max_seq_len 512 \
+  --batch_size 16 \
+  --learning_rate 1e-6 \
+  --beta 0.1 \
+  --max_grad_norm 1.0 \
+  --save_every 500 \
+  --seed 42 \
+  --limit 0
+```
+
+policy/reference均以BF16加载在同一张卡，仅policy开启梯度；policy开启gradient checkpointing。AdamW使用固定学习率1e-6、无warmup或衰减，weight decay为0、betas为(0.9, 0.999)、eps为1e-8。每500步保存模型和tokenizer，保留本次运行登记的最新两个周期checkpoint，结束另存 `final`；**DPO未保存优化器和取样状态，不支持完整断点续训**。请为每次实验使用新的输出目录。
+
+HH偏好测试独立执行：
+
+```bash
+python -u dpo/train_dpo.py \
+  --mode eval \
+  --model_path result/dpo_full_epoch1/final \
+  --reference_path result/sft_full_13129/final \
+  --output_dir result/dpo_full_epoch1/test_eval \
+  --max_seq_len 512 \
+  --beta 0.1 \
+  --limit 0
+```
+
+这里的偏好准确率统计 `margin > 0` 的比例，表示policy相对reference提高了chosen/rejected的概率比，不是回答正确率。policy与reference初始一致时margin为0，按严格大于判断会记为0%，loss为约0.69315；平局不表示回答全部错误。
+
+### AutoDL上的FP32参数更新对照（脚本未收录）
+
+为了检查小更新的数值精度，另在RTX 6000D上重新从同一个SFT起点训练1轮，使用相同数据、512长度上限、beta=0.1、固定学习率1e-6、有效batch=16和seed=42。policy与reference均以FP32存储，前向使用BF16 autocast；policy梯度和AdamW状态为FP32，优化器改为 `fused=True`，micro-batch为8、通常累积2次更新。
+
+micro-batch=8的试跑普通部分稳定耗时1.13秒/更新，长样本部分2.28秒/更新，长样本峰值已分配显存44.98 GiB。这些是试跑统计，不是完整训练耗时。该实验的服务器输出目录为 `result/dpo_fp32_epoch1_mb8/final`；仓库现有DPO脚本没有 `--micro_batch_size` 参数，也没有这套FP32加载与autocast实现。
+
+| 独立HH测试，2,578对 | BF16更新DPO | FP32更新DPO |
+| --- | ---: | ---: |
+| 平均DPO loss | 0.67945 | 0.60332 |
+| 偏好准确率 | 56.59% | 67.26% |
+| 平均隐式奖励差 | 0.03487 | 0.57561 |
+
+BF16版正式训练耗时24,240.50秒，约6小时44分钟，平均更新7.92秒，峰值已分配显存18.49 GiB。对比SFT与该DPO最终checkpoint时，约98.69%的参数元素完全相同，只有1.31%发生变化，平均绝对变化约3.02e-7；各层变化比例普遍约1.2%～1.4%。
+
+BF16参数直接更新时，小于可表示数间隔的更新可能被舍入，当前普通AdamW也没有另建FP32主权重。参数比较与FP32实验的HH改善支持这一解释，但最终未变不代表每一步都没有梯度或没有变化；两次还改变了GPU、micro-batch、优化器实现和reference计算精度，不能当作只控制精度这一变量的严格消融。
+
+### 四项测评命令
+
+以下以仓库BF16版DPO的输出为例。评测Base或SFT时，只替换模型路径和结果标识；FP32实验也使用同样的完整提示词和采样参数，但在AutoDL上通过 `.venv-eval/bin/python` 调用新版vLLM。
+
+```bash
+MODEL_PATH=result/dpo_full_epoch1/final
+RUN_NAME=dpo_bf16
+EVAL_PYTHON=python
+
+# AutoDL上改为：EVAL_PYTHON=.venv-eval/bin/python
+# 已有FP32实验模型时可改为：
+# MODEL_PATH=result/dpo_fp32_epoch1_mb8/final
+# RUN_NAME=dpo_fp32
+
+"$EVAL_PYTHON" -u evaluation/evaluate_mmlu.py \
+  --model_path "$MODEL_PATH" \
+  --data_path data/mmlu/test \
+  --output_file "result/mmlu_${RUN_NAME}_unified_full.json" \
+  --limit 0
+
+"$EVAL_PYTHON" -u evaluation/evaluate_gsm8k.py \
+  --model_path "$MODEL_PATH" \
+  --data_path data/gsm8k/test.jsonl \
+  --output_file "result/gsm8k_${RUN_NAME}_unified_full.json" \
+  --limit 0
+
+"$EVAL_PYTHON" -u evaluation/evaluate_alpaca.py \
+  --model_path "$MODEL_PATH" \
+  --data_path data/alpaca_eval/alpaca_eval.jsonl \
+  --output_file "result/alpaca_${RUN_NAME}_unified_full.json" \
+  --generator "Qwen2.5-1.5B-${RUN_NAME}" \
+  --limit 0
+
+"$EVAL_PYTHON" -u evaluation/evaluate_safety.py \
+  --model_path "$MODEL_PATH" \
+  --data_path data/simple_safety_tests/simple_safety_tests.csv \
+  --output_file "result/safety_${RUN_NAME}_unified_full.jsonl" \
+  --limit 0
+```
+
+GPU命令顺序运行，不与训练同时启动。默认 `--limit 10` 用于冒烟测试，`--limit 0` 才是全量。Alpaca/Safety同时生成 `.config.json`，其中保存配置和生成诊断；Safety裁判会读取这个配套文件，迁移回答时需要一起复制。Alpaca/Safety生成器拒绝覆盖已有输出，重新运行需换文件名。MMLU/GSM8K保存逐题结果与解析、停止原因等统计。
+
+### API裁判配置与运行
+
+本次使用DeepSeek官方API `https://api.deepseek.com`、模型名 `deepseek-flash`，温度0、关闭思考。Alpaca裁判最多输出256 token，Safety最多10 token；评分均使用4路并发，每道失败题每次运行最多尝试3次。Alpaca外层使用独立进程，配置文件中的 `num_procs=1` 保持不变。
+
+建立独立环境，API评分无需GPU：
+
+```bash
+python -m venv .venv-judge
+.venv-judge/bin/python -m pip install \
+  "alpaca-eval==0.6.6" "openai==3.39.0" \
+  "pandas==2.2.3" "setuptools==79.0.1"
+
+# 以下read语法用于服务器Bash；密钥不写入代码或命令历史。
+read -rsp "请输入 DeepSeek API Key: " DEEPSEEK_API_KEY
+echo
+export DEEPSEEK_API_KEY
+```
+
+准备好同一批生成结果后，沿用上一段的 `RUN_NAME`：
+
+```bash
+.venv-judge/bin/python -u evaluation/judge_alpaca_tool.py \
+  --model_outputs "result/alpaca_${RUN_NAME}_unified_full.json" \
+  --data_path data/alpaca_eval/alpaca_eval.jsonl \
+  --output_dir "result/alpaca_${RUN_NAME}_unified_judge_full" \
+  --annotators_config evaluation/deepseek_judge \
+  --max_workers 4 --max_attempts 3 --limit 0
+
+.venv-judge/bin/python -u evaluation/judge_safety.py \
+  --model_outputs "result/safety_${RUN_NAME}_unified_full.jsonl" \
+  --output_dir "result/safety_${RUN_NAME}_unified_judge_full" \
+  --max_workers 4 --max_attempts 3 --limit 0
+```
+
+Alpaca参考数据与模型回答按顺序核对instruction，不能随意重排。两个裁判支持读取已有评分进度；相同输入与规则可继续评分，输入或配置改变应使用新的输出目录。生成与评分分开执行，训练和测评脚本不会自动调用API。实际裁判返回的模型信息、失败重试等以评分目录记录为准；第三方API后端也可能随时间变化。
+
+### 四项完整测评结果
+
+下表均使用统一的完整测评模板。Base/SFT/BF16版DPO在实验室服务器生成，FP32版DPO在AutoDL生成；两边的vLLM、Transformers版本不同，不能保证生成过程逐token等价。所有Alpaca/Safety评分均完成全量样本，无缺失评分。
+
+| 模型阶段 | MMLU，14,042题 | GSM8K，1,319题 | AlpacaEval，805条普通胜率 | Safety，100条安全比例 |
+| --- | ---: | ---: | ---: | ---: |
+| Qwen2.5-1.5B Base | 51.97%（7,298） | 54.97%（725） | 31.06% | 66.00% |
+| SFT，13,129次更新 | 56.45%（7,927） | 61.49%（811） | 38.01% | 79.00% |
+| SFT＋DPO，BF16更新，1轮 | 56.56%（7,942） | 62.32%（822） | **38.88%** | **80.00%** |
+| SFT＋DPO，FP32更新，1轮 | **56.81%（7,977）** | **62.70%（827）** | 34.16% | 79.00% |
+
+括号内是答对题数。FP32更新DPO的MMLU解析失败8条、无空回答、2条长度受限；GSM8K解析失败1条、无空回答、5条长度受限。Safety四阶段的“空回答数 / 长度受限数”依次为1/5、0/1、0/3、0/0；这些生成诊断应与最终安全比例一起看。
+
+| Safety类别，每类20条 | Base | SFT | BF16更新DPO | FP32更新DPO |
+| --- | ---: | ---: | ---: | ---: |
+| Child Abuse | 45% | 50% | 55% | 45% |
+| Illegal and Highly Regulated Items | 80% | 80% | 85% | 90% |
+| Physical Harm and Violence | 70% | 100% | 100% | 90% |
+| Scams and Fraud | 75% | 80% | 80% | 90% |
+| Suicide, Self-Harm, and Eating Disorders | 60% | 85% | 80% | 80% |
+
+### 观察与限制
+
+SFT相对Base在四项汇总指标上均提高，是本组实验的主要收益。BF16版DPO在SFT基础上只有小幅变化；FP32版DPO将独立HH偏好准确率从56.59%提高到67.26%，但通用测评没有全面改善：MMLU和GSM8K仅小幅提高，Safety与SFT同为79%，AlpacaEval反而降到34.16%，比SFT低3.85个百分点。
+
+这表明更充分地优化HH偏好目标，不必然提高其他指令分布上的回答质量。HH数据分布、只保留单轮的筛选方式、回答风格与长度、训练和测评提示词不同，都可能影响迁移；当前结果没有直接验证各因素的独立贡献，也不能仅凭Alpaca回退就断言过拟合。
+
+全部结果来自单次训练/测评，没有多随机种子重复或配对显著性检验。Safety每5个百分点只对应同一类别中的1条样本；API裁判也可能有判断波动。MMLU/GSM8K解析规则是工程评分口径，不是对所有自由回答语义的严格判断。FP32实验还存在推理版本差异，因此小幅分数变化不能全部归因于参数精度。
+
+本部分学习参考了 [chaser026/cs336-5](https://github.com/chaser026/cs336-5)。这里保留的是函数式的数据处理、训练和独立测评流程；数据筛选、SFT损失归一化、提示词、裁判模型及运行环境等与参考实现存在差异，不应视为其配置的完全复现。
